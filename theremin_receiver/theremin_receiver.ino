@@ -1,6 +1,6 @@
 #include <Adafruit_NeoPixel.h>
 
-#define NEOPIXEL_PIN 6
+#define NEOPIXEL_PIN 11
 
 #define NORMALIZED_MAX_INPUT 2000
 
@@ -14,6 +14,15 @@
 #define STATUS_LED_PIN 13
 
 #define NUM_SAMPLES 5
+
+/******** Sine wave parameters ********/
+#define PI2 6.283185 // 2*PI saves calculation later
+#define AMP 127 // Scaling factor for sine wave
+#define OFFSET 128 // Offset shifts wave to all >0 values
+
+/******** Lookup table ********/
+#define LENGTH 256 // Length of the wave lookup table
+byte wave[LENGTH]; // Storage for waveform
 
 Adafruit_NeoPixel neopixels = Adafruit_NeoPixel(60, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -37,7 +46,35 @@ void setup() {
   lastPos[0] = lastPos[1] = 0;
   lastTimeWithNonZeroData = millis();
   
-  neopixels.begin();
+  /******** Setup the waveform output code ********/
+  /** Populate the waveform table with a sine wave **/
+  for (int i=0; i<LENGTH; i++) { // Step across wave table
+     float v = (AMP*sin((PI2/LENGTH)*i)); // Compute value
+     wave[i] = int(v+OFFSET); // Store value as integer
+   }
+  
+  /****Set timer1 for 8-bit fast PWM output ****/
+   pinMode(9, OUTPUT); // Make timer’s PWM pin an output
+   TCCR1B = (1 << CS10); // Set prescaler to full 16MHz
+   TCCR1A |= (1 << COM1A1); // Pin low when TCNT1=OCR1A
+   TCCR1A |= (1 << WGM10); // Use 8-bit fast PWM mode
+   TCCR1B |= (1 << WGM12);
+  
+  /******** Set up timer2 to call ISR ********/
+   TCCR2A = 0; // No options in control register A
+   TCCR2B = (1 << CS21); // Set prescaler to divide by 8
+   TIMSK2 = (1 << OCIE2A); // Call ISR when TCNT2 = OCRA2
+   OCR2A = 32; // Set frequency of generated wave
+   sei(); // Enable interrupts to generate waveform!
+  
+   neopixels.begin();
+}
+
+int mapToAudioValue(double scaledValue) {
+  //return max(scaledValue, 10);
+  Serial.print(pow(scaledValue, 0.5));
+  int ceiling = 70;
+  return int(max(ceiling - pow(scaledValue*ceiling*ceiling, 0.5), 10));
 }
 
 void loop() {
@@ -55,7 +92,7 @@ void loop() {
   Serial.print(":\t");
   Serial.print(valAvgs[0]);
   Serial.print("\t");
-  Serial.println(valAvgs[1]);
+  Serial.print(valAvgs[1]);
   
   if (valAvgs[0] >= SCREENSAVER_BREAK_INPUT_THRESHOLD ||
       valAvgs[1] >= SCREENSAVER_BREAK_INPUT_THRESHOLD) {
@@ -71,6 +108,11 @@ void loop() {
       scaledValues[i] = max(0, min((valAvgs[i] / NORMALIZED_MAX_INPUT)*255, 255));
     }
     
+    int audioValue = mapToAudioValue(valAvgs[0] / NORMALIZED_MAX_INPUT);
+    Serial.print("\t");
+    Serial.println(audioValue);
+    OCR2A = audioValue;
+  
     // convert input values --> HSV --> RGB
     uint8_t r, g, b;
     HSVtoRGB(scaledValues[0], SATURATION_VALUE, scaledValues[1], &r, &g, &b);
@@ -91,7 +133,7 @@ void loop() {
       } else if (nextByte == 0xC2) {
         valIndex = 1;
       }
-      
+       
       if (valIndex != -1) {
         digitalWrite(STATUS_LED_PIN, isStatusLEDLit ? HIGH : LOW);
         isStatusLEDLit = !isStatusLEDLit; 
@@ -151,6 +193,15 @@ double getValAverage(int valIndex) {
     sum += lastVals[valIndex][i];
   }
   return sum / NUM_SAMPLES;
+}
+
+/******** Called every time TCNT2 = OCR2A ********/
+ISR(TIMER2_COMPA_vect) { // Called when TCNT2 == OCR2A
+ static byte waveIndex=0; // Points to each table entry
+ OCR1AL = wave[waveIndex++]; // Update the PWM output
+ waveIndex = waveIndex % LENGTH;
+ //asm(“NOP;NOP”); // Fine tuning
+ TCNT2 = 6; // Timing to compensate for ISR run time
 }
 
 void HSVtoRGB(uint8_t h, uint8_t s, uint8_t v, uint8_t *r, uint8_t *g, uint8_t *b) {
