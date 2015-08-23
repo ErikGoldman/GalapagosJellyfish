@@ -19,7 +19,7 @@
 #define CLEAR_ALL_TIMER1_INT_FLAGS    (TIFR1 = TIFR1)
 
 #define DEBUG 0
-#define NORMALIZED_MAX 2000.0
+#define NORMALIZED_MAX 5000.0
 
 int pinLed = 13;                 // LED connected to digital pin 13
 int pinFreq = 5;
@@ -75,12 +75,11 @@ unsigned int ww;
 int cal;
 int cal_max;
 
-char st1[32];
 long freq_in;
 long freq_zero;
 long freq_cal;
 
-long largest_value_seen = 1;
+int largest_value_seen = 100;
 
 unsigned int dds;
 int32_t tune = 0;
@@ -145,10 +144,7 @@ int processSerialByteIfAvailable() {
       if (serial_in_buffer_position == SERIAL_BUFFER_SIZE) {
         resetBuffer();
         has_gotten_serial_data = true;
-        other_theremin_last_val = bufferToInt();
-  
-        dbg_print("From other theremin: ");
-        dbg_print(other_theremin_last_val);      
+        other_theremin_last_val = bufferToInt();      
       }
     } else {
       resetBuffer();
@@ -161,18 +157,22 @@ void loop()
   cnt++;
   f_meter_start();
 
-  int normalizedTune = (int)(((double)tune / largest_value_seen) * NORMALIZED_MAX);
+  int normalizedTune = ((double)tune / largest_value_seen) * NORMALIZED_MAX;
   Serial.write(0xA1);
   Serial.write(0xB5);
   Serial.write(0xC1);  
-  writeInt(normalizedTune);
+  writeInt((int)normalizedTune);
   
   if (has_gotten_serial_data) {
+    dbg_print("Writing ");
+    dbg_print(other_theremin_last_val);
     Serial.write(0xA1);
     Serial.write(0xB5);  
     Serial.write(0xC2);
     writeInt(other_theremin_last_val);
   }
+  
+  Serial.flush();
   
   while (f_ready==0) {            // wait for period length end (100ms) by interrupt
     processSerialByteIfAvailable();
@@ -209,22 +209,27 @@ void loop()
   if (cal > cal_max) cal_max=cal;
 
   digitalWrite(pinLed,1);  // let LED blink
+  dbg_print("\t");
   dbg_print(cnt);
-  dbg_print("  "); 
 
-  sprintf(st1, " %04d",tune);
-  dbg_print(st1);
-  dbg_print("  "); 
+  char buf[32];
+  snprintf(buf, 32, "%04d", tune);
+  dbg_print("\t");
+  dbg_print(buf);
+
+  snprintf(buf, 32, "%04d", normalizedTune);  
+  dbg_print("\t");
+  dbg_print(buf);
   
-  dbg_print((int)normalizedTune);
-  dbg_print("  "); 
+  dbg_print("\t");
+  dbg_print(largest_value_seen);
 
+  dbg_print("\t");
   dbg_print(freq_in);
-  dbg_print("  ");
 
+  dbg_print("\t");
   dbg_print(freq_zero);
-  dbg_print("  ");
-  dbg_print(cal_max);
+
   dbg_print("\n");
   digitalWrite(pinLed,0);
 

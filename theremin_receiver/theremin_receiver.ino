@@ -1,8 +1,11 @@
 #include <Adafruit_NeoPixel.h>
 
+#define AUDIO_PIN    9
 #define NEOPIXEL_PIN 11
 
-#define NORMALIZED_MAX_INPUT 2000
+//#define DEBUG 1
+
+#define NORMALIZED_MAX_INPUT 5000
 
 #define SCREENSAVER_BREAK_INPUT_THRESHOLD 0.1
 #define SCREENSAVER_IDLE_TIME (10*1000)
@@ -15,18 +18,22 @@
 
 #define NUM_SAMPLES 5
 
+unsigned int cnt = 0;
+
 /******** Sine wave parameters ********/
 #define PI2 6.283185 // 2*PI saves calculation later
 #define AMP 127 // Scaling factor for sine wave
 #define OFFSET 128 // Offset shifts wave to all >0 values
 
 /******** Lookup table ********/
-#define LENGTH 256 // Length of the wave lookup table
-byte wave_tables[2][256];
-const int WAVE_TABLE_LENGTHS[2] = {256, 128};
+#define LENGTH 64 // Length of the wave lookup table
+byte wave_tables[2][LENGTH];
+const int WAVE_TABLE_LENGTHS[2] = {LENGTH, LENGTH/2};
 const static int LONG_WAVE_TABLE = 0, SHORT_WAVE_TABLE = 1;
 byte *currWaveTable;
 int currWaveTableLength;
+
+int currToneValue = 0;
 
 Adafruit_NeoPixel neopixels = Adafruit_NeoPixel(60, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -35,9 +42,30 @@ uint8_t lastPos[2];
 
 unsigned long lastTimeWithNonZeroData;
 
+void debug_print(const char *str) {
+  #ifdef DEBUG
+  Serial.print(str);
+  #else
+  if (cnt % 20 == 0) {
+    Serial.print(str);
+  }
+  #endif
+}
+
+void debug_print(double i) {
+  #ifdef DEBUG
+  Serial.print(i);
+  #else
+  if (cnt % 20 == 0) {
+    Serial.print(i);
+  }
+  #endif
+}
+
 void setup() {
   pinMode(NEOPIXEL_PIN, OUTPUT);
   pinMode(STATUS_LED_PIN, OUTPUT);
+  pinMode(AUDIO_PIN, OUTPUT);
   
   Serial.begin(38400);
   
@@ -61,31 +89,67 @@ void setup() {
      wave_tables[SHORT_WAVE_TABLE][i] = int(v+OFFSET); // Store value as integer
    }
    
-   currWaveTable = (byte*)wave_tables[0];
-   currWaveTableLength = WAVE_TABLE_LENGTHS[0];
+   /*
+   currWaveTable = (byte*)wave_tables[SHORT_WAVE_TABLE];
+   currWaveTableLength = WAVE_TABLE_LENGTHS[SHORT_WAVE_TABLE];
+   */
+   
+   currWaveTable = (byte*)wave_tables[LONG_WAVE_TABLE];
+   currWaveTableLength = WAVE_TABLE_LENGTHS[LONG_WAVE_TABLE];
   
    pinMode(9, OUTPUT); // Make timer’s PWM pin an output
    noInterrupts();
    {
-     /****Set timer1 for 8-bit fast PWM output ****/
+     // ****Set timer1 for 8-bit fast PWM output ****
      TCCR1B = (1 << CS10); // Set prescaler to full 16MHz
      TCCR1A |= (1 << COM1A1); // Pin low when TCNT1=OCR1A
      TCCR1A |= (1 << WGM10); // Use 8-bit fast PWM mode
      TCCR1B |= (1 << WGM12);
-    
-    /******** Set up timer2 to call ISR ********/
+     OCR1AL = 0;
+
+     /*
+    // ******** Set up timer2 to call ISR *******
      TCCR2A = 0; // No options in control register A
      TCCR2B = (1 << CS21); // Set prescaler to divide by 8
-     TIMSK2 = 0; // don't call ISR for now
+     TIMSK2 = 0; // don't call ISR for now   
+     OCR2A  = 150; 
+     */
    }
    interrupts();
    
-   setIsPlayingTone(false);
+   setIsPlayingTone(true);
   
    neopixels.begin();
 }
 
-void loop() {
+void loop() {  
+  // block for data
+  while(true) {
+    // wait until something changes
+    if (blockForByte() == 0xA1 &&
+      blockForByte() == 0xB5) {
+        
+      int nextByte = blockForByte();
+      
+      int valIndex = -1;      
+      if (nextByte == 0xC1) {
+        valIndex = 0;
+      } else if (nextByte == 0xC2) {
+        valIndex = 1;
+      }
+       
+      if (valIndex != -1) {
+        int inputVal = serialReadInt();  
+        lastVals[valIndex][lastPos[valIndex]] = inputVal;
+        lastPos[valIndex] = (lastPos[valIndex]+1) % NUM_SAMPLES;        
+        
+        gotNewData();
+      }    
+    }
+  }
+}
+
+void gotNewData() {
   static bool isStatusLEDLit = false;
   
   long currMs = millis();
@@ -96,12 +160,14 @@ void loop() {
     thereminValues[i] = undoNonlinearityAndAverage(i);
   }
   
-  Serial.print(currMs);
-  Serial.print(":\t");
-  Serial.print(thereminValues[0]);
-  Serial.print("\t");
-  Serial.print(thereminValues[1]);
-  Serial.print("\t");
+  cnt++;
+  
+  debug_print(currMs);
+  debug_print(":\t");
+  debug_print(thereminValues[0]);
+  debug_print("\t");
+  debug_print(thereminValues[1]);
+  debug_print("\t");
   
   if (thereminValues[0] >= SCREENSAVER_BREAK_INPUT_THRESHOLD ||
       thereminValues[1] >= SCREENSAVER_BREAK_INPUT_THRESHOLD) {
@@ -114,46 +180,21 @@ void loop() {
     playTheremin(thereminValues[0], thereminValues[1]);
   }
   
-  Serial.println("");
-  
-  // block for data
-  while(true) {
-    // wait until something changes
-    if (blockForByte() == 0xA1 &&
-      blockForByte() == 0xB5) {
-        
-      int nextByte = blockForByte();
-  
-      int valIndex = -1;      
-      if (nextByte == 0xC1) {
-        valIndex = 0;
-      } else if (nextByte == 0xC2) {
-        valIndex = 1;
-      }
-       
-      if (valIndex != -1) {
-        digitalWrite(STATUS_LED_PIN, isStatusLEDLit ? HIGH : LOW);
-        isStatusLEDLit = !isStatusLEDLit; 
-        
-        int inputVal = serialReadInt();  
-        lastVals[valIndex][lastPos[valIndex]] = inputVal;
-        lastPos[valIndex] = (lastPos[valIndex]+1) % NUM_SAMPLES;        
-        break;
-      }    
-    }
-  }
+  debug_print("\n");  
 }
 
 // theremin values are scaled 0..1
 void playTheremin(double thereminOne, double thereminTwo) {
+  static long lastUpdateTime = 0;
+  
+  long currTime = millis();
+  
   // set the music
   setToneValue(thereminOne);
   setVolume(thereminTwo);
-
+  
   // set the lights
-  uint8_t r, g, b;
-  HSVtoRGB(thereminOne * 255, SATURATION_VALUE, thereminOne * 255, &r, &g, &b);
-  setAllNeopixels(neopixels.Color(r, g, b));
+  setAllNeopixels(thereminOne * 255, SATURATION_VALUE, thereminTwo * 255);
 }
 
 // shows a fun demo that cycles through colors
@@ -166,16 +207,24 @@ void showScreenSaver() {
   uint8_t h = (ms / H_STEP_TIME) % 255,
           s = (ms / S_STEP_TIME) % 200 + 55,
           v = ((ms / V_STEP_TIME) % 105) + 50;          
-  uint8_t r, g, b;
+
+  debug_print("SCREENSAVER");
+  setAllNeopixels(h, s, v);
   
-  HSVtoRGB(h, s, v, &r, &g, &b);
-  
-  Serial.print("SCREENSAVER");
-  setAllNeopixels(neopixels.Color(r, g, b));
+  setIsPlayingTone(false);
 }
 
 int blockForByte() {
+  static uint64_t lastWriteTime = 0;
+  static uint16_t waveIndex=0; // Points to each table entry 
+  
   while (!Serial.available()) {
+    // delay    
+    for (volatile uint32_t i=0; i < currToneValue; i++) {
+    }
+    
+    waveIndex = waveIndex % currWaveTableLength;
+    OCR1AL = currWaveTable[waveIndex++];
   }
   return Serial.read();
 }
@@ -193,7 +242,7 @@ int serialReadInt() {
 double undoNonlinearityAndAverage(int valIndex) {
   double sum = 0;
   for (int i=0; i < NUM_SAMPLES; i++) {
-    double value = (lastVals[valIndex][i] / NORMALIZED_MAX_INPUT);
+    double value = max(min(((double)lastVals[valIndex][i] / NORMALIZED_MAX_INPUT), 1.0), 0.0);
     
     // undo non-linearity by taking the square-root
     value = pow(value, 0.5);
@@ -213,12 +262,14 @@ void setIsPlayingTone(bool isPlaying) {
   isInitialized = true;  
   lastIsPlaying = isPlaying;
   
+  /*
   if (isPlaying) {
     TIMSK2 = (1 << OCIE2A); // Call ISR when TCNT2 = OCRA2
   } else {
     TIMSK2 = 0; // stop the timer ISR
     OCR1AL = 0; // stop PWM output by always outputting a 0
   }
+  */
 }
 
 // thereminValue is 0..1
@@ -229,38 +280,15 @@ void setVolume(double thereminValue) {
 
 // thereminValue is 0..1
 void setToneValue(double thereminValue) {
-  int toneValue = (int)(thereminValue * 65 + 10);
+  const static int MAX_TONE = 75, MIN_TONE = 1;
   
-  Serial.print("Tone: ");
-  Serial.print(toneValue);
+  int toneValue = max(min((MAX_TONE - (int)(thereminValue * (MAX_TONE - MIN_TONE))), MAX_TONE), MIN_TONE);
   
-  if (toneValue <= 5) {
-    // for now this is too fast -- error and continue
-    Serial.print(" ******* TOO LOW!!! ERROR!!! ******** ");
-    toneValue = 5;
-  }
+  debug_print("Tone: ");
+  debug_print(toneValue);
   
-  // if tone values get below 32, use the short wave table so we don't fire the
-  // time interrupt so frequently
-  if (toneValue < 32) {
-    currWaveTable = (byte*)wave_tables[SHORT_WAVE_TABLE];
-    OCR2A = toneValue * 2;
-  } else {
-    currWaveTable = (byte*)wave_tables[LONG_WAVE_TABLE];
-    OCR2A = toneValue;
-  }
-}
-
-/******** Called every time TCNT2 = OCR2A ********/
-ISR(TIMER2_COMPA_vect) { // Called when TCNT2 == OCR2A
-  static byte waveIndex=0; // Points to each table entry
-
-  // index into the correct wave table and set the PWM value
-  waveIndex = waveIndex % currWaveTableLength;
-  OCR1AL = currWaveTable[waveIndex++];
-
-  //asm(“NOP;NOP”); // Fine tuning
-  TCNT2 = 6; // Timing to compensate for ISR run time
+  //currToneValue = ((double)toneValue / 75) * 800;
+  currToneValue = toneValue;
 }
 
 void HSVtoRGB(uint8_t h, uint8_t s, uint8_t v, uint8_t *r, uint8_t *g, uint8_t *b) {
@@ -324,12 +352,16 @@ void _HSVtoRGB( float *r, float *g, float *b, float h, float s, float v ) {
   }
 }
 
-void setAllNeopixels(uint32_t color) {
+void setAllNeopixels(int h, int s, int v) {
   static long lastUpdateTime = 0;
   
   long currTime = millis();
   
   if (currTime - lastUpdateTime >= NEOPIXEL_UPDATE_MIN_MS) {
+    uint8_t r, g, b;
+    HSVtoRGB(h, s, v, &r, &g, &b);
+    int color = neopixels.Color(r, g, b);
+  
     for (int i=0; i < neopixels.numPixels(); i++) {
       neopixels.setPixelColor(i, color);
     }
