@@ -4,7 +4,7 @@
 
 #define NORMALIZED_MAX_INPUT 2000
 
-#define SCREENSAVER_BREAK_INPUT_THRESHOLD 50
+#define SCREENSAVER_BREAK_INPUT_THRESHOLD 0.1
 #define SCREENSAVER_IDLE_TIME (10*1000)
 #define NEOPIXEL_UPDATE_MIN_MS 20
 
@@ -22,7 +22,11 @@
 
 /******** Lookup table ********/
 #define LENGTH 256 // Length of the wave lookup table
-byte wave[LENGTH]; // Storage for waveform
+byte wave_tables[2][256];
+const int WAVE_TABLE_LENGTHS[2] = {256, 128};
+const static int LONG_WAVE_TABLE = 0, SHORT_WAVE_TABLE = 1;
+byte *currWaveTable;
+int currWaveTableLength;
 
 Adafruit_NeoPixel neopixels = Adafruit_NeoPixel(60, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -48,33 +52,37 @@ void setup() {
   
   /******** Setup the waveform output code ********/
   /** Populate the waveform table with a sine wave **/
-  for (int i=0; i<LENGTH; i++) { // Step across wave table
-     float v = (AMP*sin((PI2/LENGTH)*i)); // Compute value
-     wave[i] = int(v+OFFSET); // Store value as integer
+  for (int i=0; i < WAVE_TABLE_LENGTHS[LONG_WAVE_TABLE]; i++) { // Step across wave table
+     float v = (AMP*sin((PI2/WAVE_TABLE_LENGTHS[LONG_WAVE_TABLE])*i)); // Compute value
+     wave_tables[LONG_WAVE_TABLE][i] = int(v+OFFSET); // Store value as integer
    }
+   for (int i=0; i < WAVE_TABLE_LENGTHS[SHORT_WAVE_TABLE]; i++) { // Step across wave table
+     float v = (AMP*sin((PI2/WAVE_TABLE_LENGTHS[SHORT_WAVE_TABLE])*i)); // Compute value
+     wave_tables[SHORT_WAVE_TABLE][i] = int(v+OFFSET); // Store value as integer
+   }
+   
+   currWaveTable = (byte*)wave_tables[0];
+   currWaveTableLength = WAVE_TABLE_LENGTHS[0];
   
-  /****Set timer1 for 8-bit fast PWM output ****/
    pinMode(9, OUTPUT); // Make timer’s PWM pin an output
-   TCCR1B = (1 << CS10); // Set prescaler to full 16MHz
-   TCCR1A |= (1 << COM1A1); // Pin low when TCNT1=OCR1A
-   TCCR1A |= (1 << WGM10); // Use 8-bit fast PWM mode
-   TCCR1B |= (1 << WGM12);
-  
-  /******** Set up timer2 to call ISR ********/
-   TCCR2A = 0; // No options in control register A
-   TCCR2B = (1 << CS21); // Set prescaler to divide by 8
-   TIMSK2 = (1 << OCIE2A); // Call ISR when TCNT2 = OCRA2
-   OCR2A = 32; // Set frequency of generated wave
-   sei(); // Enable interrupts to generate waveform!
+   noInterrupts();
+   {
+     /****Set timer1 for 8-bit fast PWM output ****/
+     TCCR1B = (1 << CS10); // Set prescaler to full 16MHz
+     TCCR1A |= (1 << COM1A1); // Pin low when TCNT1=OCR1A
+     TCCR1A |= (1 << WGM10); // Use 8-bit fast PWM mode
+     TCCR1B |= (1 << WGM12);
+    
+    /******** Set up timer2 to call ISR ********/
+     TCCR2A = 0; // No options in control register A
+     TCCR2B = (1 << CS21); // Set prescaler to divide by 8
+     TIMSK2 = 0; // don't call ISR for now
+   }
+   interrupts();
+   
+   setIsPlayingTone(false);
   
    neopixels.begin();
-}
-
-int mapToAudioValue(double scaledValue) {
-  //return max(scaledValue, 10);
-  Serial.print(pow(scaledValue, 0.5));
-  int ceiling = 70;
-  return int(max(ceiling - pow(scaledValue*ceiling*ceiling, 0.5), 10));
 }
 
 void loop() {
@@ -83,41 +91,30 @@ void loop() {
   long currMs = millis();
 
   // get the averages from the Arduino sensors to smooth the data a bit  
-  double valAvgs[2];
+  double thereminValues[2];
   for (int i=0; i < 2; i++) {
-    valAvgs[i] = getValAverage(i);   
+    thereminValues[i] = undoNonlinearityAndAverage(i);
   }
   
   Serial.print(currMs);
   Serial.print(":\t");
-  Serial.print(valAvgs[0]);
+  Serial.print(thereminValues[0]);
   Serial.print("\t");
-  Serial.print(valAvgs[1]);
+  Serial.print(thereminValues[1]);
+  Serial.print("\t");
   
-  if (valAvgs[0] >= SCREENSAVER_BREAK_INPUT_THRESHOLD ||
-      valAvgs[1] >= SCREENSAVER_BREAK_INPUT_THRESHOLD) {
+  if (thereminValues[0] >= SCREENSAVER_BREAK_INPUT_THRESHOLD ||
+      thereminValues[1] >= SCREENSAVER_BREAK_INPUT_THRESHOLD) {
     lastTimeWithNonZeroData = currMs;
   }
   
   if (currMs - lastTimeWithNonZeroData > SCREENSAVER_IDLE_TIME) {
     showScreenSaver();
-  } else {  
-    // take 0 --> NORMALIZED_MAX_INPUT and rescale to 0 --> 255
-    int scaledValues[2];
-    for (int i=0; i < 2; i++) {
-      scaledValues[i] = max(0, min((valAvgs[i] / NORMALIZED_MAX_INPUT)*255, 255));
-    }
-    
-    int audioValue = mapToAudioValue(valAvgs[0] / NORMALIZED_MAX_INPUT);
-    Serial.print("\t");
-    Serial.println(audioValue);
-    OCR2A = audioValue;
-  
-    // convert input values --> HSV --> RGB
-    uint8_t r, g, b;
-    HSVtoRGB(scaledValues[0], SATURATION_VALUE, scaledValues[1], &r, &g, &b);
-    setAllNeopixels(neopixels.Color(r, g, b));
+  } else {
+    playTheremin(thereminValues[0], thereminValues[1]);
   }
+  
+  Serial.println("");
   
   // block for data
   while(true) {
@@ -147,6 +144,18 @@ void loop() {
   }
 }
 
+// theremin values are scaled 0..1
+void playTheremin(double thereminOne, double thereminTwo) {
+  // set the music
+  setToneValue(thereminOne);
+  setVolume(thereminTwo);
+
+  // set the lights
+  uint8_t r, g, b;
+  HSVtoRGB(thereminOne * 255, SATURATION_VALUE, thereminOne * 255, &r, &g, &b);
+  setAllNeopixels(neopixels.Color(r, g, b));
+}
+
 // shows a fun demo that cycles through colors
 // used to do something interesting if no one is playing the theremin
 void showScreenSaver() {
@@ -156,19 +165,12 @@ void showScreenSaver() {
   
   uint8_t h = (ms / H_STEP_TIME) % 255,
           s = (ms / S_STEP_TIME) % 200 + 55,
-          v = ((ms / V_STEP_TIME) % 105) + 150;          
+          v = ((ms / V_STEP_TIME) % 105) + 50;          
   uint8_t r, g, b;
   
   HSVtoRGB(h, s, v, &r, &g, &b);
   
-  Serial.print("Showing screensaver (");
-  Serial.print(r);
-  Serial.print(" ");
-  Serial.print(g);
-  Serial.print(" ");
-  Serial.print(b);
-  Serial.println(")");
-  
+  Serial.print("SCREENSAVER");
   setAllNeopixels(neopixels.Color(r, g, b));
 }
 
@@ -187,21 +189,78 @@ int serialReadInt() {
    return data;
 }
 
-double getValAverage(int valIndex) {
+// returns a value 0..1 corresponding to the theremin value
+double undoNonlinearityAndAverage(int valIndex) {
   double sum = 0;
   for (int i=0; i < NUM_SAMPLES; i++) {
-    sum += lastVals[valIndex][i];
+    double value = (lastVals[valIndex][i] / NORMALIZED_MAX_INPUT);
+    
+    // undo non-linearity by taking the square-root
+    value = pow(value, 0.5);
+    
+    sum += value;
   }
   return sum / NUM_SAMPLES;
 }
 
+void setIsPlayingTone(bool isPlaying) {
+  static bool lastIsPlaying = false, isInitialized = false;
+  
+  if (isPlaying == lastIsPlaying && isInitialized) {
+    return;
+  }
+  
+  isInitialized = true;  
+  lastIsPlaying = isPlaying;
+  
+  if (isPlaying) {
+    TIMSK2 = (1 << OCIE2A); // Call ISR when TCNT2 = OCRA2
+  } else {
+    TIMSK2 = 0; // stop the timer ISR
+    OCR1AL = 0; // stop PWM output by always outputting a 0
+  }
+}
+
+// thereminValue is 0..1
+void setVolume(double thereminValue) {
+  // TODO: this physical theremin is busted so just say yes always =)
+  setIsPlayingTone(true);
+}
+
+// thereminValue is 0..1
+void setToneValue(double thereminValue) {
+  int toneValue = (int)(thereminValue * 65 + 10);
+  
+  Serial.print("Tone: ");
+  Serial.print(toneValue);
+  
+  if (toneValue <= 5) {
+    // for now this is too fast -- error and continue
+    Serial.print(" ******* TOO LOW!!! ERROR!!! ******** ");
+    toneValue = 5;
+  }
+  
+  // if tone values get below 32, use the short wave table so we don't fire the
+  // time interrupt so frequently
+  if (toneValue < 32) {
+    currWaveTable = (byte*)wave_tables[SHORT_WAVE_TABLE];
+    OCR2A = toneValue * 2;
+  } else {
+    currWaveTable = (byte*)wave_tables[LONG_WAVE_TABLE];
+    OCR2A = toneValue;
+  }
+}
+
 /******** Called every time TCNT2 = OCR2A ********/
 ISR(TIMER2_COMPA_vect) { // Called when TCNT2 == OCR2A
- static byte waveIndex=0; // Points to each table entry
- OCR1AL = wave[waveIndex++]; // Update the PWM output
- waveIndex = waveIndex % LENGTH;
- //asm(“NOP;NOP”); // Fine tuning
- TCNT2 = 6; // Timing to compensate for ISR run time
+  static byte waveIndex=0; // Points to each table entry
+
+  // index into the correct wave table and set the PWM value
+  waveIndex = waveIndex % currWaveTableLength;
+  OCR1AL = currWaveTable[waveIndex++];
+
+  //asm(“NOP;NOP”); // Fine tuning
+  TCNT2 = 6; // Timing to compensate for ISR run time
 }
 
 void HSVtoRGB(uint8_t h, uint8_t s, uint8_t v, uint8_t *r, uint8_t *g, uint8_t *b) {
