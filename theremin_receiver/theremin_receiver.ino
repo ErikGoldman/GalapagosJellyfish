@@ -81,18 +81,17 @@ void setup() {
   /******** Setup the waveform output code ********/
   /** Populate the waveform table with a sine wave **/
   for (int i=0; i < WAVE_TABLE_LENGTHS[LONG_WAVE_TABLE]; i++) { // Step across wave table
-     float v = (AMP*sin((PI2/WAVE_TABLE_LENGTHS[LONG_WAVE_TABLE])*i)); // Compute value
-     wave_tables[LONG_WAVE_TABLE][i] = int(v+OFFSET); // Store value as integer
+    float major = sin((PI2/WAVE_TABLE_LENGTHS[LONG_WAVE_TABLE])*i),
+          h1    = sin((PI2/WAVE_TABLE_LENGTHS[LONG_WAVE_TABLE])*i*2),
+          h2    = sin((PI2/WAVE_TABLE_LENGTHS[LONG_WAVE_TABLE])*i*4);
+    
+    float v = (AMP/2)*major + (AMP/4) * h1 + (AMP/8) * h2; // Compute value          
+    wave_tables[LONG_WAVE_TABLE][i] = int(v+OFFSET); // Store value as integer
    }
    for (int i=0; i < WAVE_TABLE_LENGTHS[SHORT_WAVE_TABLE]; i++) { // Step across wave table
      float v = (AMP*sin((PI2/WAVE_TABLE_LENGTHS[SHORT_WAVE_TABLE])*i)); // Compute value
      wave_tables[SHORT_WAVE_TABLE][i] = int(v+OFFSET); // Store value as integer
    }
-   
-   /*
-   currWaveTable = (byte*)wave_tables[SHORT_WAVE_TABLE];
-   currWaveTableLength = WAVE_TABLE_LENGTHS[SHORT_WAVE_TABLE];
-   */
    
    currWaveTable = (byte*)wave_tables[LONG_WAVE_TABLE];
    currWaveTableLength = WAVE_TABLE_LENGTHS[LONG_WAVE_TABLE];
@@ -106,19 +105,9 @@ void setup() {
      TCCR1A |= (1 << WGM10); // Use 8-bit fast PWM mode
      TCCR1B |= (1 << WGM12);
      OCR1AL = 0;
-
-     /*
-    // ******** Set up timer2 to call ISR *******
-     TCCR2A = 0; // No options in control register A
-     TCCR2B = (1 << CS21); // Set prescaler to divide by 8
-     TIMSK2 = 0; // don't call ISR for now   
-     OCR2A  = 150; 
-     */
    }
    interrupts();
-   
-   setIsPlayingTone(true);
-  
+
    neopixels.begin();
 }
 
@@ -209,9 +198,8 @@ void showScreenSaver() {
           v = ((ms / V_STEP_TIME) % 105) + 50;          
 
   debug_print("SCREENSAVER");
+  setVolume(0);
   setAllNeopixels(h, s, v);
-  
-  setIsPlayingTone(false);
 }
 
 int blockForByte() {
@@ -252,30 +240,9 @@ double undoNonlinearityAndAverage(int valIndex) {
   return sum / NUM_SAMPLES;
 }
 
-void setIsPlayingTone(bool isPlaying) {
-  static bool lastIsPlaying = false, isInitialized = false;
-  
-  if (isPlaying == lastIsPlaying && isInitialized) {
-    return;
-  }
-  
-  isInitialized = true;  
-  lastIsPlaying = isPlaying;
-  
-  /*
-  if (isPlaying) {
-    TIMSK2 = (1 << OCIE2A); // Call ISR when TCNT2 = OCRA2
-  } else {
-    TIMSK2 = 0; // stop the timer ISR
-    OCR1AL = 0; // stop PWM output by always outputting a 0
-  }
-  */
-}
-
 // thereminValue is 0..1
 void setVolume(double thereminValue) {
   // TODO: this physical theremin is busted so just say yes always =)
-  setIsPlayingTone(true);
 }
 
 // thereminValue is 0..1
@@ -287,7 +254,6 @@ void setToneValue(double thereminValue) {
   debug_print("Tone: ");
   debug_print(toneValue);
   
-  //currToneValue = ((double)toneValue / 75) * 800;
   currToneValue = toneValue;
 }
 
