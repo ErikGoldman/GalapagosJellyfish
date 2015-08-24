@@ -1,4 +1,5 @@
 #include <Adafruit_NeoPixel.h>
+#include <Wire.h>
 
 #define AUDIO_PIN    9
 #define NEOPIXEL_PIN 11
@@ -10,6 +11,8 @@
 #define SCREENSAVER_BREAK_INPUT_THRESHOLD 0.1
 #define SCREENSAVER_IDLE_TIME (10*1000)
 #define NEOPIXEL_UPDATE_MIN_MS 20
+
+#define VOLUME_MUTE_CUTOFF 0.2
 
 // lol, I dunno...
 #define SATURATION_VALUE 150
@@ -68,6 +71,9 @@ void setup() {
   pinMode(AUDIO_PIN, OUTPUT);
   
   Serial.begin(38400);
+  
+  Wire.begin();  
+  setVolume(0);
   
   // initialize value buffer data
   for (int i=0; i < 2; i++) {
@@ -242,7 +248,32 @@ double undoNonlinearityAndAverage(int valIndex) {
 
 // thereminValue is 0..1
 void setVolume(double thereminValue) {
-  // TODO: this physical theremin is busted so just say yes always =)
+  // 0101 control code, then A0, A1, A2 = 0 (grounded)
+  const static byte DEVICE_ADDRESS = 0b0101000,
+                    SET_POT1       = 0b10101001;
+                    
+  const static int VOLUME_RANGE = 64 - 4; // set a reasonable max loudness
+                    
+  byte potValue = (1 << 6); // mute mode
+  if (thereminValue >= VOLUME_MUTE_CUTOFF) {
+    // rescale from MUTE..1 to 0..1
+    thereminValue = (thereminValue - VOLUME_MUTE_CUTOFF) / (1 - VOLUME_MUTE_CUTOFF);
+    // take a root for non-linearity
+    thereminValue = pow(thereminValue, 0.2);
+    
+    potValue = max(64 - (int)(thereminValue * VOLUME_RANGE), 0);
+    
+    debug_print("Volume: ");
+    debug_print(potValue);
+  } else {
+    debug_print("Volume: MUTED");
+  }
+  
+  Wire.beginTransmission(DEVICE_ADDRESS);
+  Wire.write(byte(SET_POT1)); // DS1807 change POT1 command (from datasheet)
+  Wire.write(potValue); // send value
+  //Wire.write(0); // send value
+  Wire.endTransmission(true); // end and release the bus  
 }
 
 // thereminValue is 0..1
